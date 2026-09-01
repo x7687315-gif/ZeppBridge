@@ -65,7 +65,7 @@ fn seeded_db(dir: &PathBuf) -> Database {
         device_id: None,
         start_utc: chrono::DateTime::from_timestamp(1_706_784_000, 0).unwrap(),
         end_utc: None,
-        payload: serde_json::json!({ "samples": [{ "ts": 1706784000, "hr": 72 }] }),
+        payload: serde_json::json!({ "items": [{ "timestamp": 1706784000, "value": 72 }] }),
         capability: CapabilityStatus::Verified,
     })
     .unwrap();
