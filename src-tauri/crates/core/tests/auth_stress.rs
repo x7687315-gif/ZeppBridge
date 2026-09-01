@@ -332,9 +332,10 @@ fn auth_manager_rejects_invalid_inputs_early() {
 }
 
 #[test]
-fn auth_info_debug_leaks_full_token() {
-    // 这是一个「钉死问题」的测试：AuthInfo 当前 derive Debug，会原样打印 app_token。
-    // 任何处理过日志 / panic 的调用方都可能把它写进日志或崩溃报告。
+fn auth_info_debug_never_leaks_token() {
+    // R1 的回归门。历史 bug：AuthInfo 曾直接 derive(Debug)，app_token 会被
+    // format!("{auth:?}")、panic 消息或崩溃报告原样带出去。v2.0.0 改为手写
+    // Debug 永久打码（连长度都不给）——这个测试防止未来有人把 derive 加回来。
     let auth = AuthInfo {
         app_token: "super-secret-token-xyz".to_string(),
         user_id: "u1".to_string(),
@@ -342,8 +343,12 @@ fn auth_info_debug_leaks_full_token() {
     };
     let debug = format!("{:?}", auth);
     assert!(
-        debug.contains("super-secret-token-xyz"),
-        "AuthInfo Debug 输出应当包含完整 token，以证明存在泄漏面；当前输出：{debug}"
+        !debug.contains("super-secret-token-xyz"),
+        "AuthInfo 的 Debug 输出绝不能包含完整 token；当前输出：{debug}"
+    );
+    assert!(
+        debug.contains("app_token"),
+        "打码输出仍应保留字段名以便调试；当前输出：{debug}"
     );
 }
 

@@ -273,3 +273,91 @@ fn notification_without_id_is_silently_ignored() {
     let ping = session.request(1, "ping", json!({}));
     assert!(ping["result"].is_object(), "收到通知后仍应正常响应 ping：{ping}");
 }
+
+// ---------------------------------------------------------------------------
+// v2.0.0：双时代协议（2026-07-28 modern 无握手 + legacy initialize）
+// ---------------------------------------------------------------------------
+
+const MODERN_VERSION: &str = "2026-07-28";
+const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
+
+#[test]
+fn modern_discover_serves_the_2026_07_28_surface() {
+    let dir = temp_dir("modern-discover");
+    let mut session = McpSession::new(&dir);
+
+    // modern 客户端不需要 initialize：第一句话就是 server/discover。
+    let resp = session.request(
+        1,
+        "server/discover",
+        json!({ "_meta": { META_PROTOCOL_VERSION: MODERN_VERSION } }),
+    );
+    let result = resp["result"].as_object().expect("server/discover 应返回 result");
+    assert_eq!(result["resultType"], "complete", "modern 结果必须带 resultType");
+    assert_eq!(
+        result["_meta"][META_SERVER_INFO]["name"],
+        "zeppbridge",
+        "身份在 _meta 里，不再是顶层 serverInfo"
+    );
+    let versions = result["supportedVersions"].as_array().unwrap();
+    assert!(
+        versions.iter().any(|v| v == MODERN_VERSION),
+        "必须声明支持 2026-07-28"
+    );
+}
+
+#[test]
+fn modern_tools_call_stays_read_only_and_carries_result_type() {
+    let dir = temp_dir("modern-call");
+    let _db = seeded_db(&dir);
+    let before = db_bytes(&dir);
+
+    let mut session = McpSession::new(&dir);
+    let health = session.request(
+        1,
+        "tools/call",
+        json!({
+            "name": "get_data_health",
+            "arguments": { "windowDays": 30 },
+            "_meta": { META_PROTOCOL_VERSION: MODERN_VERSION },
+        }),
+    );
+    assert!(
+        health["result"]["resultType"] == "complete",
+        "modern tools/call 结果必须带 resultType=complete：{health}"
+    );
+
+    let after = db_bytes(&dir);
+    assert_eq!(before, after, "modern 路径同样必须只读");
+}
+
+#[test]
+fn mixing_eras_is_refused_not_silently_absorbed() {
+    let dir = temp_dir("mixed-era");
+    let mut session = McpSession::new(&dir);
+
+    // modern 客户端发 initialize：这一版已经没有握手，必须明确拒绝。
+    let resp = session.request(
+        1,
+        "initialize",
+        json!({ "_meta": { META_PROTOCOL_VERSION: MODERN_VERSION } }),
+    );
+    assert_eq!(resp["error"]["code"], -32601, "混用两个时代要被说清楚");
+}
+
+#[test]
+fn unsupported_protocol_version_lists_supported_ones() {
+    let dir = temp_dir("bad-version");
+    let mut session = McpSession::new(&dir);
+
+    let resp = session.request(
+        1,
+        "tools/list",
+        json!({ "_meta": { META_PROTOCOL_VERSION: "1999-01-01" } }),
+    );
+    let error = resp["error"].as_object().expect("不支持的版本应报错");
+    assert_eq!(error["code"], -32022, "2026-07-28 的 UnsupportedProtocolVersionError");
+    let supported = error["data"]["supported"].as_array().expect("错误必须带支持列表");
+    assert!(supported.iter().any(|v| v == MODERN_VERSION));
+}
