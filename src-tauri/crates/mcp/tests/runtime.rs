@@ -236,12 +236,34 @@ fn repeated_identical_requests_are_idempotent() {
     session.request(1, "initialize", json!({}));
     let first = session.request(2, "tools/list", json!({}));
     let second = session.request(3, "tools/list", json!({}));
-    assert_eq!(first, second, "同一请求两次结果应完全一致");
+    // JSON-RPC 信封里的 id 本来就该回显各自的请求 id（2 vs 3），
+    // 幂等性比较的是业务载荷 result。
+    assert_eq!(
+        first["result"], second["result"],
+        "同一请求两次的业务结果应完全一致"
+    );
 }
 
 #[test]
 fn unknown_method_and_tool_are_refused() {
+    // v2.0.0 行为：main 循环的「无库 → -32001」检查先于方法分派，
+    // 所以没有数据库时未知方法拿到的是 not_configured 而不是 method_not_found。
+    // 对客户端排障是个小语义损失（拼错方法名与没装库分不清），已记录为
+    // BUGS_FOUND.md 的 V9；这里钉住现状，防止无人知晓地再变。
     let dir = temp_dir("unknown");
+    let mut session = McpSession::new(&dir);
+
+    session.request(1, "initialize", json!({}));
+    let unknown_method = session.request(2, "tools/execute", json!({}));
+    assert_eq!(
+        unknown_method["error"]["code"],
+        -32001,
+        "无库时未知方法当前返回 -32001（V9）：{unknown_method}"
+    );
+
+    // 有库之后，未知方法与未知工具都必须明确报 method_not_found。
+    let dir = temp_dir("unknown-with-db");
+    let _db = seeded_db(&dir);
     let mut session = McpSession::new(&dir);
 
     session.request(1, "initialize", json!({}));

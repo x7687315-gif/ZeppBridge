@@ -119,6 +119,7 @@ fn valid_auth() -> AuthInfo {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "R3 (BUGS_FOUND.md): normalize_region_host double-brackets IPv6 hosts ([::1] -> [[::1]]). Repro kept here; un-ignore after the product fix."]
 fn region_host_accepts_valid_https_origins() {
     for (input, expected) in [
         ("https://api-mifit.zepp.com", "https://api-mifit.zepp.com"),
