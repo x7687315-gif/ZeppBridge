@@ -50,9 +50,9 @@ fn seeded_db(dir: &PathBuf) -> Database {
         source_key: "2026-01-01".to_string(),
         source_scope: SourceScope::UserFused,
         device_id: None,
-        start_utc: chrono::DateTime::from_timestamp(1_706_784_000, 0).unwrap(),
+        start_utc: chrono::DateTime::from_timestamp(1_768_435_200, 0).unwrap(),
         end_utc: None,
-        payload: serde_json::json!({ "items": [{ "timestamp": 1706784000, "value": 72 }] }),
+        payload: serde_json::json!({ "items": [{ "timestamp": 1768435200, "value": 72 }] }),
         capability: CapabilityStatus::Verified,
     })
     .unwrap();
