@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use zeppbridge_core::auth::{normalize_region_host, AuthManager, CredentialBackend};
+use zeppbridge_core::auth::{AuthManager, CredentialBackend, normalize_region_host};
 use zeppbridge_core::models::AuthInfo;
 
 static DIR_SEQ: AtomicU32 = AtomicU32::new(0);
