@@ -26,6 +26,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  smoke-cli-mcp-runtime:
+    name: 快速冒烟（cli+mcp runtime，~1-2min）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Rust 系统依赖（keyring 的 Secret Service 后端需要 dbus）
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: 只跑 cli / mcp 的 runtime 集成测试（快速验证改动的用例）
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml -p zeppbridge-cli --test runtime -- --nocapture
+          cargo test --manifest-path src-tauri/Cargo.toml -p zeppbridge-mcp --test runtime -- --nocapture
+
   daily-linux:
     name: 日常级（ubuntu）
     runs-on: ubuntu-latest
