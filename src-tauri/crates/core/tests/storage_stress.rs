@@ -21,7 +21,7 @@ use zeppbridge_core::models::{CapabilityStatus, RawRecord, SourceScope};
 use zeppbridge_core::storage::backup::{
     self, BackupKind, BackupVerification, MIGRATION_BACKUP_KEEP,
 };
-use zeppbridge_core::storage::coverage::{month_chunks, ChunkStatus, BACKFILL_STREAMS};
+use zeppbridge_core::storage::coverage::{BACKFILL_STREAMS, ChunkStatus, month_chunks};
 use zeppbridge_core::storage::write_lock::{self, WritePurpose};
 use zeppbridge_core::storage::Database;
 
