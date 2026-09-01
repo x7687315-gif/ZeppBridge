@@ -1,0 +1,95 @@
+# 运行时强度测试沙盒。
+#
+# 与 ci.yml 的区别：这里只编译 zeppbridge-core / cli / mcp（不构建 Tauri 壳，
+# 不需要 webkit2gtk / 前端 dist），专门跑 tests/ 下的运行时强度测试。
+#
+# - 日常级：push / PR 自动跑，秒级~分钟级，覆盖关键路径与中等数据量。
+# - 压力级：带 #[ignore] 的用例，只在手动触发（勾选 run-stress）时跑。
+#   本地等价命令：cargo test --manifest-path src-tauri/Cargo.toml -p zeppbridge-core -- --ignored --nocapture
+
+name: runtime-stress-sandbox
+
+on:
+  push:
+    branches: [stress-tests]
+  pull_request:
+    branches: [stress-tests]
+  workflow_dispatch:
+    inputs:
+      run-stress:
+        description: '同时运行压力级用例（#[ignore]，耗时较长）'
+        type: boolean
+        default: true
+
+concurrency:
+  group: runtime-stress-sandbox-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  daily-linux:
+    name: 日常级（ubuntu）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Rust 系统依赖（keyring 的 Secret Service 后端需要 dbus）
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Rust 日常级测试（core + cli + mcp）
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml \
+            -p zeppbridge-core -p zeppbridge-cli -p zeppbridge-mcp \
+            --locked -- --nocapture
+      - name: clippy / fmt 不破（仅测试相关 crate）
+        run: |
+          cargo clippy --manifest-path src-tauri/Cargo.toml \
+            -p zeppbridge-core -p zeppbridge-cli -p zeppbridge-mcp \
+            --locked --all-targets -- -D warnings
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check \
+            -p zeppbridge-core -p zeppbridge-cli -p zeppbridge-mcp
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: 前端与 Cloudflare Functions 测试
+        run: |
+          npm ci
+          npm test
+          npm run test:functions
+
+  daily-windows:
+    name: 日常级（windows）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      # Windows 的锁实现走 share_mode(0)、凭证走 windows-native，语义与
+      # Unix 不同，必须单独验证。
+      - name: Rust 日常级测试（core + cli + mcp）
+        run: cargo test --manifest-path src-tauri/Cargo.toml -p zeppbridge-core -p zeppbridge-cli -p zeppbridge-mcp --locked -- --nocapture
+
+  stress-linux:
+    name: 压力级（ubuntu，#[ignore]）
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.run-stress
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: 压力级 Rust 测试（全部 --ignored 用例）
+        run: cargo test --manifest-path src-tauri/Cargo.toml -p zeppbridge-core --locked -- --ignored --nocapture
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: 压力级 Node 脚本（scripts/stress/run-all.mjs 存在时）
+        if: hashFiles('scripts/stress/run-all.mjs') != ''
+        run: node scripts/stress/run-all.mjs
