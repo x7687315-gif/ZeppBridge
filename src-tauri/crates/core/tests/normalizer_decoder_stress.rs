@@ -39,7 +39,7 @@ fn synthetic_track(track_id: i64, seconds: usize, hr: bool, gps: bool) -> Value 
             coords.push_str("1,1;");
         }
         if hr {
-            heart.push_str(&format!("1,1;"));
+            heart.push_str("1,1;");
         } else {
             heart.push_str("1,0;");
         }
