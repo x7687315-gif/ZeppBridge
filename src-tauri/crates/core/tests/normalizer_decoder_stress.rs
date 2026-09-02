@@ -105,6 +105,15 @@ fn broken_payload(kind: &str, index: usize) -> Value {
     }
 }
 
+/// 这 4 类属于「结构性缺失」：解析不到 trackid / 形状不对，必须被拒绝。
+///
+/// 另外 3 类（`extreme_deltas` / `truncated` / `wrong_types`）解码器是**宽容**
+/// 的——它按能读出来的部分重建一条运动，这是设计选择，不是「坏数据混进好
+/// 数据」。所以批量用例的期望结果必须按类判定，不能一律要求 Err。
+fn must_be_rejected(kind: &str) -> bool {
+    matches!(kind, "missing_trackid" | "invalid_trackid" | "no_data" | "empty")
+}
+
 // ---------------------------------------------------------------------------
 // decoder：批量坏数据
 // ---------------------------------------------------------------------------
@@ -122,29 +131,49 @@ fn batch_of_mixed_good_and_bad_details_never_poisons_the_batch() {
     ];
     let mut good = 0usize;
     let mut bad = 0usize;
+    let mut expected_bad = 0usize;
     for index in 0..600usize {
+        let kind = kinds[index % kinds.len()];
         let raw = match index % 3 {
             0 => synthetic_track(BASE_TRACK + index as i64, 30, true, true),
-            1 => broken_payload(kinds[index % kinds.len()], index),
+            1 => {
+                if must_be_rejected(kind) {
+                    expected_bad += 1;
+                }
+                broken_payload(kind, index)
+            }
             _ => synthetic_track(BASE_TRACK + index as i64, 5, false, false),
         };
+        let expect_ok = index % 3 != 1 || !must_be_rejected(kind);
         match decode_workout_detail(&raw, None) {
             Ok(decoded) => {
+                assert!(expect_ok, "index {index}: 结构性坏数据不应解码成功");
                 good += 1;
-                // 能解码出来的必须自洽：样本数 = 时长 + 1，时间单调。
+                // 能解码出来的必须自洽：样本数 = **截断后**时长 + 1，时间单调。
+                //
+                // 注意 R4：`end_time` 不受 12 小时封顶约束，只有生成样本的
+                // `duration_secs` 被 clamp（decoder/workout_detail.rs:293-302）。
+                // 坏增量（如 999999999 秒）会把 end_time 推到几十年后，而样本仍
+                // 按 43200 秒封顶——所以不变量要用 clamp 后的时长复算，不能用
+                // 原始端点差，否则极端坏数据一出现就误报。
                 assert!(decoded.end_time >= decoded.start_time);
+                let clamped = (decoded.end_time - decoded.start_time)
+                    .num_seconds()
+                    .clamp(1, 12 * 60 * 60);
                 assert_eq!(
                     decoded.samples.len() as i64,
-                    (decoded.end_time - decoded.start_time).num_seconds() + 1,
-                    "index {index}: 样本数与时长不自洽"
+                    clamped + 1,
+                    "index {index}: 样本数与（截断后）时长不自洽"
                 );
             }
-            Err(_) => bad += 1,
+            Err(_) => {
+                assert!(!expect_ok, "index {index}: 好数据不该被拒绝");
+                bad += 1;
+            }
         }
     }
-    // 每 3 条里 1 条坏数据：600 条中 200 条必须被拒绝、400 条成功。
-    assert_eq!(bad, 200, "坏数据必须被拒绝");
-    assert_eq!(good, 400, "好数据必须全部解码成功");
+    assert_eq!(bad, expected_bad, "结构性坏数据必须全部被拒绝");
+    assert_eq!(good, 600 - expected_bad, "其余必须全部解码成功");
 }
 
 #[test]
@@ -239,20 +268,34 @@ fn stress_three_thousand_mixed_details_stay_stable() {
     ];
     let mut good = 0usize;
     let mut bad = 0usize;
+    let mut expected_bad = 0usize;
     for index in 0..3000usize {
+        let kind = kinds[index % kinds.len()];
         let raw = match index % 3 {
             0 => synthetic_track(BASE_TRACK + index as i64, 120, true, index % 6 == 0),
-            1 => broken_payload(kinds[index % kinds.len()], index),
+            1 => {
+                if must_be_rejected(kind) {
+                    expected_bad += 1;
+                }
+                broken_payload(kind, index)
+            }
             _ => synthetic_track(BASE_TRACK + index as i64, 30, false, false),
         };
+        let expect_ok = index % 3 != 1 || !must_be_rejected(kind);
         match decode_workout_detail(&raw, None) {
-            Ok(_) => good += 1,
-            Err(_) => bad += 1,
+            Ok(_) => {
+                assert!(expect_ok, "index {index}: 结构性坏数据不应解码成功");
+                good += 1;
+            }
+            Err(_) => {
+                assert!(!expect_ok, "index {index}: 好数据不该被拒绝");
+                bad += 1;
+            }
         }
     }
     println!("3000 条混合详情解码耗时 {:?}", started.elapsed());
-    assert_eq!(good, 2000);
-    assert_eq!(bad, 1000);
+    assert_eq!(bad, expected_bad);
+    assert_eq!(good, 3000 - expected_bad);
 }
 
 #[test]
@@ -289,7 +332,9 @@ fn medium_gps_track_decodes_exactly_in_ci() {
     let raw = synthetic_track(BASE_TRACK, 2_000, true, true);
     let decoded = decode_workout_detail(&raw, None).unwrap();
     assert_eq!(decoded.route.len(), 2_000);
-    assert_eq!(decoded.samples.len(), 2_001);
+    // 合成串是 1 个 `0` 加 1999 个 `1`：Δ 之和 = 1999s，样本覆盖 0..=1999
+    // 共 2000 个（不是 2001）。
+    assert_eq!(decoded.samples.len(), 2_000);
 }
 
 // ---------------------------------------------------------------------------
@@ -322,20 +367,25 @@ fn normalizer_bad_items_are_skipped_and_good_ones_survive() {
 
 #[test]
 fn normalizer_empty_payload_is_unavailable_not_zero() {
-    // 空 items：普通入口报 DataUnavailable（不是 Ok 空结果），
-    // 带诊断的入口返回 Ok 但 0 条 + 有诊断。
+    // 空 items：`extract_items`（normalizer/mod.rs:1073）把「空」当作**不可用**
+    // 信号，普通入口与诊断入口都返回 Err(DataUnavailable)——**不是** Ok + 空列表。
     let raw = json!({ "items": [] });
-    assert!(Normalizer::normalize_heart_rate(&raw).is_err());
-    let batch = Normalizer::normalize_heart_rate_with_diagnostics(&raw).unwrap();
-    assert!(batch.records.is_empty());
-    assert!(!batch.diagnostics.is_empty());
+    match Normalizer::normalize_heart_rate(&raw) {
+        Err(err) => assert!(err.to_string().contains("为空"), "错误应说明是空: {err}"),
+        Ok(_) => panic!("空 items 必须报不可用，不应是 Ok"),
+    }
+    match Normalizer::normalize_heart_rate_with_diagnostics(&raw) {
+        Err(err) => assert!(err.to_string().contains("为空"), "错误应说明是空: {err}"),
+        Ok(_) => panic!("诊断路径同样不应把空 items 当成 Ok"),
+    }
 
-    // 完全没有 items 数组同样处理。
+    // 完全没有 items 数组：连结构都不对，报 ParseError。
     let raw = json!({ "unrelated": 1 });
     assert!(Normalizer::normalize_heart_rate(&raw).is_err());
     assert!(Normalizer::normalize_hrv(&raw).is_err());
 
-    // items 里是标量 / null 等垃圾：不 panic，逐条拒绝。
+    // items 里是标量 / null 等垃圾：items 非空所以 extract_items 放行，
+    // 逐条进 diagnostics，绝不 panic、也绝不补 0。
     let raw = json!({ "items": [null, 42, "text", [], {}] });
     let batch = Normalizer::normalize_heart_rate_with_diagnostics(&raw).unwrap();
     assert!(batch.records.is_empty());
@@ -365,13 +415,17 @@ fn normalizer_repeated_parsing_is_deterministic() {
 fn normalizer_workout_type_missing_stays_missing() {
     // 数字码未知：类型必须是 unknown:{code}，绝不继承 endpoint sport 名，
     // 也绝不能凭空变成 0 或某个猜测值。
+    //
+    // 注意形状：`extract_items` 只认顶层数组或 items/records/results/list
+    // （以及 data.<同上的键>）。裸的 `{"data": {...}}` 对象里没有这些数组，
+    // 会落到 ParseError，所以必须把 workout 包进 `items` 数组。
     let raw = json!({
-        "data": {
+        "items": [{
             "trackid": BASE_TRACK,
             "type": 9999,
             "start_time": 1_700_000_000,
             "end_time": 1_700_000_600,
-        }
+        }]
     });
     let workouts = Normalizer::normalize_workouts_with_sport(&raw, Some("running")).unwrap();
     assert_eq!(workouts.len(), 1);
