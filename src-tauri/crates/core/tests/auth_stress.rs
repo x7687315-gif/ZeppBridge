@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use zeppbridge_core::auth::{AuthManager, CredentialBackend, normalize_region_host};
+use zeppbridge_core::auth::{normalize_region_host, AuthManager, CredentialBackend};
 use zeppbridge_core::models::AuthInfo;
 
 static DIR_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -224,11 +224,7 @@ fn auth_manager_rolls_back_credential_store_when_metadata_write_fails() {
     assert!(result.is_err(), "元数据写失败时 save_auth 应当报错");
 
     // 回滚必须清掉刚刚写进凭据存储的 token。
-    assert_eq!(
-        backend.last(),
-        None,
-        "凭据存储应当被回滚到未保存状态"
-    );
+    assert_eq!(backend.last(), None, "凭据存储应当被回滚到未保存状态");
 }
 
 #[test]
@@ -367,10 +363,7 @@ fn credential_backend_errors_do_not_contain_token_values() {
     });
 
     let error = result.unwrap_err().to_string();
-    assert!(
-        !error.contains(leak_token),
-        "错误信息泄漏了 token: {error}"
-    );
+    assert!(!error.contains(leak_token), "错误信息泄漏了 token: {error}");
 }
 
 // ---------------------------------------------------------------------------

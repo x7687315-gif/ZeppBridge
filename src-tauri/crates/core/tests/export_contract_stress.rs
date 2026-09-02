@@ -123,7 +123,11 @@ fn seeded_db(label: &str, heart_minutes: usize) -> Database {
             coords.push_str("4004663552,11629333504;");
             distance.push_str("0,0;");
         }
-        heart.push_str(&format!("{},{};", if second == 0 { 0 } else { 1 }, 120 + second % 40));
+        heart.push_str(&format!(
+            "{},{};",
+            if second == 0 { 0 } else { 1 },
+            120 + second % 40
+        ));
     }
     let detail = json!({ "data": {
         "trackid": track_id,
@@ -343,9 +347,12 @@ fn stress_repeated_export_of_a_month_dataset() {
     let first = serde_json::from_str::<Value>(&first_json).unwrap();
     let (csv_baseline, _) = to_csv(
         &serde_json::from_str::<Value>(
-            &db.build_ai_export(&make_selection(&["heart_rate", "workouts"], ExportDetail::Summary))
-                .unwrap()
-                .0,
+            &db.build_ai_export(&make_selection(
+                &["heart_rate", "workouts"],
+                ExportDetail::Summary,
+            ))
+            .unwrap()
+            .0,
         )
         .unwrap(),
     )
@@ -354,12 +361,19 @@ fn stress_repeated_export_of_a_month_dataset() {
         let (encoded, again_size) = db.build_ai_export(&selection).unwrap();
         assert_eq!(again_size, size);
         let again = serde_json::from_str::<Value>(&encoded).unwrap();
-        assert_eq!(semantic_view(&again), semantic_view(&first), "第 {round} 轮漂移");
+        assert_eq!(
+            semantic_view(&again),
+            semantic_view(&first),
+            "第 {round} 轮漂移"
+        );
         let (csv_again, _) = to_csv(
             &serde_json::from_str::<Value>(
-                &db.build_ai_export(&make_selection(&["heart_rate", "workouts"], ExportDetail::Summary))
-                    .unwrap()
-                    .0,
+                &db.build_ai_export(&make_selection(
+                    &["heart_rate", "workouts"],
+                    ExportDetail::Summary,
+                ))
+                .unwrap()
+                .0,
             )
             .unwrap(),
         )

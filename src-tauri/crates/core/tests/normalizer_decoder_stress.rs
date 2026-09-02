@@ -111,7 +111,10 @@ fn broken_payload(kind: &str, index: usize) -> Value {
 /// 的——它按能读出来的部分重建一条运动，这是设计选择，不是「坏数据混进好
 /// 数据」。所以批量用例的期望结果必须按类判定，不能一律要求 Err。
 fn must_be_rejected(kind: &str) -> bool {
-    matches!(kind, "missing_trackid" | "invalid_trackid" | "no_data" | "empty")
+    matches!(
+        kind,
+        "missing_trackid" | "invalid_trackid" | "no_data" | "empty"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -198,7 +201,10 @@ fn missing_fields_stay_missing_never_zero() {
     let decoded = decode_workout_detail(&raw, None).unwrap();
     assert!(decoded.route.is_empty());
     assert!(
-        decoded.samples.iter().any(|sample| sample.heart_rate == Some(70)),
+        decoded
+            .samples
+            .iter()
+            .any(|sample| sample.heart_rate == Some(70)),
         "心率仍然要解码出来"
     );
 
@@ -312,7 +318,10 @@ fn stress_long_gps_track_decodes_exactly() {
     // 最后一个点 = 第一个点 + 9999 个最小步长。
     let last = &decoded.route[9_999];
     let expected = 40.04663552 + 9_999.0 / 100_000_000.0;
-    assert!((last.latitude - expected).abs() < 1e-8, "累计 delta 不能漂移");
+    assert!(
+        (last.latitude - expected).abs() < 1e-8,
+        "累计 delta 不能漂移"
+    );
     // 时间单调且逐秒。
     for pair in decoded.route.windows(2) {
         assert_eq!(
@@ -431,7 +440,11 @@ fn normalizer_workout_type_missing_stays_missing() {
     assert_eq!(workouts.len(), 1);
     let workout = &workouts[0];
     assert_eq!(workout.type_source, "unknown_code");
-    assert!(workout.normalized_type.starts_with("unknown:"), "{}", workout.normalized_type);
+    assert!(
+        workout.normalized_type.starts_with("unknown:"),
+        "{}",
+        workout.normalized_type
+    );
     assert!(
         !workout.normalized_type.contains("running"),
         "未知码不得继承 endpoint sport 名"

@@ -29,7 +29,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use chrono::{Local, TimeZone};
 use serde_json::{json, Value};
 use zeppbridge_core::auth::AuthManager;
-use zeppbridge_core::models::{CapabilityStatus, ExportDetail, ExportScope, ExportSelection, RawRecord, SourceScope};
+use zeppbridge_core::models::{
+    CapabilityStatus, ExportDetail, ExportScope, ExportSelection, RawRecord, SourceScope,
+};
 use zeppbridge_core::storage::coverage::{ChunkStatus, BACKFILL_STREAMS};
 use zeppbridge_core::storage::Database;
 
@@ -167,7 +169,7 @@ fn s1_first_day_journey_every_exit_is_honest() {
 
     // 4. 导出（用户第一次把数据交给 AI）。
     let selection = ExportSelection {
-        scope: Some(ExportScope::date_range(&local_date(1), &local_date(0))),
+        scope: Some(ExportScope::date_range(local_date(1), local_date(0))),
         start_date: None,
         end_date: None,
         data_types: vec!["hrv".to_string()],
@@ -227,7 +229,8 @@ fn s4_unworn_gap_days_do_not_exist_and_empty_is_not_failed() {
         .find(|s| s.metric == "hrv")
         .expect("hrv 序列必须存在");
     assert_eq!(
-        series.points.len() as i64, series.days_with_data,
+        series.points.len() as i64,
+        series.days_with_data,
         "points 与 days_with_data 必须自洽"
     );
     assert_eq!(series.days_with_data, 10, "只有戴表的 10 天有数据");
@@ -250,7 +253,7 @@ fn s4_unworn_gap_days_do_not_exist_and_empty_is_not_failed() {
 
     // 导出视图：空档窗口里一条样本都没有。
     let selection = ExportSelection {
-        scope: Some(ExportScope::date_range(&local_date(21), &local_date(0))),
+        scope: Some(ExportScope::date_range(local_date(21), local_date(0))),
         start_date: None,
         end_date: None,
         data_types: vec!["hrv".to_string()],
@@ -260,8 +263,10 @@ fn s4_unworn_gap_days_do_not_exist_and_empty_is_not_failed() {
     let export = serde_json::from_str::<Value>(&encoded).unwrap();
     let samples = export["data"]["metric_samples"].as_array().unwrap();
     assert_eq!(samples.len(), 10 * 12, "只应有戴表日的 120 条样本");
-    let expected_days: BTreeSet<String> =
-        worn_offsets.iter().map(|&offset| local_date(offset)).collect();
+    let expected_days: BTreeSet<String> = worn_offsets
+        .iter()
+        .map(|&offset| local_date(offset))
+        .collect();
     for sample in samples {
         let timestamp = sample["timestamp"].as_str().unwrap();
         let day = &timestamp[..10];
@@ -277,10 +282,24 @@ fn s4_unworn_gap_days_do_not_exist_and_empty_is_not_failed() {
     let aug_31 = chrono::NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
     db.plan_backfill(june_1, aug_31).unwrap();
     let chunk = "2026-06-01";
-    db.record_backfill_chunk("heart_rate", chunk, ChunkStatus::EmptyFromCloud, 0, None, None)
-        .unwrap();
-    db.record_backfill_chunk("heart_rate", "2026-07-01", ChunkStatus::Persisted, 120, None, None)
-        .unwrap();
+    db.record_backfill_chunk(
+        "heart_rate",
+        chunk,
+        ChunkStatus::EmptyFromCloud,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+    db.record_backfill_chunk(
+        "heart_rate",
+        "2026-07-01",
+        ChunkStatus::Persisted,
+        120,
+        None,
+        None,
+    )
+    .unwrap();
 
     let ledger = db.coverage_ledger().unwrap();
     assert!(

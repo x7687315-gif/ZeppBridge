@@ -6,7 +6,7 @@
 //!
 //! 运行：`cargo test -p zeppbridge-cli --test runtime -- --nocapture`
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -35,7 +35,7 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_zeppbridge-cli")
 }
 
-fn run(args: &[&str], dir: &PathBuf) -> Output {
+fn run(args: &[&str], dir: &Path) -> Output {
     let output = Command::new(bin())
         .env(DATA_DIR_ENV, dir.as_os_str())
         .args(args)
@@ -56,7 +56,7 @@ fn exit_code(output: &Output) -> i32 {
     output.status.code().expect("进程被信号终止，非正常退出")
 }
 
-fn seeded_db(dir: &PathBuf) -> Database {
+fn seeded_db(dir: &Path) -> Database {
     let db = Database::open_migrated(&dir.join("zepp.db")).unwrap();
     db.persist_fetched_record(&RawRecord {
         stream: "heart_rate".to_string(),
@@ -110,7 +110,11 @@ fn unknown_command_and_help_report_usage() {
 fn status_with_missing_database_is_not_configured() {
     let dir = temp_dir("status-missing");
     let output = run(&["status", "--json"], &dir);
-    assert_eq!(exit_code(&output), 3, "没有数据库时应返回 EXIT_NOT_CONFIGURED");
+    assert_eq!(
+        exit_code(&output),
+        3,
+        "没有数据库时应返回 EXIT_NOT_CONFIGURED"
+    );
 
     let json: Value = serde_json::from_slice(&output.stdout).expect("--json 输出应可解析");
     assert_eq!(json["ok"], false);
