@@ -21,9 +21,9 @@ use zeppbridge_core::models::{CapabilityStatus, RawRecord, SourceScope};
 use zeppbridge_core::storage::backup::{
     self, BackupKind, BackupVerification, MIGRATION_BACKUP_KEEP,
 };
-use zeppbridge_core::storage::coverage::{BACKFILL_STREAMS, ChunkStatus, month_chunks};
+use zeppbridge_core::storage::coverage::{month_chunks, ChunkStatus, BACKFILL_STREAMS};
 use zeppbridge_core::storage::write_lock::{self, WritePurpose};
-use zeppbridge_core::storage::Database;
+use zeppbridge_core::storage::{Database, CURRENT_SCHEMA_VERSION};
 
 static DIR_SEQ: AtomicU32 = AtomicU32::new(0);
 
@@ -74,34 +74,30 @@ fn raw_record(stream: &str, source_key: &str) -> RawRecord {
 /// 用独立的 rusqlite 只读连接数行 / 校验完整性 —— 刻意不经过 Database，
 /// 免得被被测代码自身的连接状态掩盖问题。
 fn count_raw_records(db_path: &Path) -> i64 {
-    let conn = rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
     conn.query_row("SELECT COUNT(*) FROM raw_records", [], |row| row.get(0))
         .unwrap()
 }
 
 fn user_version(db_path: &Path) -> i64 {
-    let conn = rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
     conn.query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap()
 }
 
 fn integrity_ok(db_path: &Path) -> bool {
-    let conn = rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    conn.query_row("PRAGMA integrity_check(1)", [], |row| row.get::<_, String>(0))
-        .map(|value| value.eq_ignore_ascii_case("ok"))
-        .unwrap_or(false)
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    conn.query_row("PRAGMA integrity_check(1)", [], |row| {
+        row.get::<_, String>(0)
+    })
+    .map(|value| value.eq_ignore_ascii_case("ok"))
+    .unwrap_or(false)
 }
 
 /// 模拟「迁移中断」：把 user_version 拨回某个旧值（schema 本体与
@@ -127,7 +123,11 @@ fn migrations_empty_database_upgrades_and_reopens_idempotently() {
         let db = Database::open_migrated(&dir.db_path())
             .unwrap_or_else(|e| panic!("第 {round} 次打开空库失败: {e}"));
         drop(db);
-        assert_eq!(user_version(&dir.db_path()), 16, "每次打开后都应是 v16");
+        assert_eq!(
+            user_version(&dir.db_path()),
+            CURRENT_SCHEMA_VERSION,
+            "每次打开后都应是当前 schema 版本"
+        );
         assert!(integrity_ok(&dir.db_path()));
     }
 }
@@ -152,8 +152,8 @@ fn migration_reentry_after_interrupt_recovers_and_keeps_data() {
         drop(db);
         assert_eq!(
             user_version(&dir.db_path()),
-            16,
-            "重入后版本号必须回到 v16（从 v{downgrade_to}）"
+            CURRENT_SCHEMA_VERSION,
+            "重入后版本号必须回到当前 schema 版本（从 v{downgrade_to}）"
         );
         assert_eq!(
             count_raw_records(&dir.db_path()),
@@ -171,7 +171,8 @@ fn migration_reentry_leaves_a_verifiable_pre_migration_backup() {
     let dir = TempDirGuard::new("mig-backup");
     {
         let db = Database::open_migrated(&dir.db_path()).unwrap();
-        db.insert_raw_record(&raw_record("sleep", "sleep-1")).unwrap();
+        db.insert_raw_record(&raw_record("sleep", "sleep-1"))
+            .unwrap();
     }
     for round in 0..(MIGRATION_BACKUP_KEEP as i32 + 4) {
         simulate_interrupted_migration(&dir.db_path(), 15);
@@ -250,14 +251,24 @@ fn coverage_large_mixed_statuses_stay_distinct() {
             match index % 4 {
                 0 => {
                     db.record_backfill_chunk(
-                        stream, &start, ChunkStatus::Persisted, 31, None, None,
+                        stream,
+                        &start,
+                        ChunkStatus::Persisted,
+                        31,
+                        None,
+                        None,
                     )
                     .unwrap();
                     persisted_rows += 1;
                 }
                 1 => {
                     db.record_backfill_chunk(
-                        stream, &start, ChunkStatus::EmptyFromCloud, 0, None, None,
+                        stream,
+                        &start,
+                        ChunkStatus::EmptyFromCloud,
+                        0,
+                        None,
+                        None,
                     )
                     .unwrap();
                     empty_rows += 1;
@@ -307,7 +318,10 @@ fn coverage_large_mixed_statuses_stay_distinct() {
             .all(|chunk| chunk.status == "pending" || chunk.status == "failed"),
         "待办队列只能有 pending/failed，不得混入 persisted/empty"
     );
-    assert_eq!(pending.len(), failed_rows + (total - failed_rows - persisted_rows - empty_rows));
+    assert_eq!(
+        pending.len(),
+        failed_rows + (total - failed_rows - persisted_rows - empty_rows)
+    );
     // 失败块必须带稳定码（英文界面靠它取文案）。
     assert!(failed
         .iter()
@@ -330,8 +344,11 @@ fn coverage_large_mixed_statuses_stay_distinct() {
         .iter()
         .find(|s| s.stream == first_failed.stream)
         .unwrap();
-    assert_eq!(stream.failed_chunks, failed_rows as i64 - 1);
-    assert_eq!(stream.persisted_chunks, (persisted_rows as i64) / (BACKFILL_STREAMS.len() as i64) + 1);
+    // failed_rows / persisted_rows 是全部流的累计数；这里断言的是
+    // first_failed 所属那**一条**流，按它自己的份额（四类去向均分）算。
+    let per_stream = chunks.len() as i64 / 4;
+    assert_eq!(stream.failed_chunks, per_stream - 1);
+    assert_eq!(stream.persisted_chunks, per_stream + 1);
 
     // 重复排同一范围不得重开任何已有结论的块。
     assert_eq!(db.plan_backfill(from, to).unwrap(), 0);
@@ -341,7 +358,8 @@ fn coverage_large_mixed_statuses_stay_distinct() {
 fn coverage_exhausted_failures_stop_autoretrying_but_stay_visible() {
     let dir = TempDirGuard::new("coverage-exhausted");
     let db = Database::open_migrated(&dir.db_path()).unwrap();
-    db.plan_backfill(date("2026-01-01"), date("2026-12-31")).unwrap();
+    db.plan_backfill(date("2026-01-01"), date("2026-12-31"))
+        .unwrap();
     let chunk = "2026-06-01";
 
     for _ in 0..zeppbridge_core::storage::coverage::MAX_AUTO_ATTEMPTS {
@@ -400,18 +418,37 @@ fn stress_coverage_thousands_of_chunks_flow_correctly() {
             let start = start.to_string();
             match index % 3 {
                 0 => {
-                    db.record_backfill_chunk(stream, &start, ChunkStatus::Persisted, 10, None, None)
-                        .unwrap();
+                    db.record_backfill_chunk(
+                        stream,
+                        &start,
+                        ChunkStatus::Persisted,
+                        10,
+                        None,
+                        None,
+                    )
+                    .unwrap();
                     persisted += 1;
                 }
                 1 => {
-                    db.record_backfill_chunk(stream, &start, ChunkStatus::EmptyFromCloud, 0, None, None)
-                        .unwrap();
+                    db.record_backfill_chunk(
+                        stream,
+                        &start,
+                        ChunkStatus::EmptyFromCloud,
+                        0,
+                        None,
+                        None,
+                    )
+                    .unwrap();
                     empty += 1;
                 }
                 _ => {
                     db.record_backfill_chunk(
-                        stream, &start, ChunkStatus::Failed, 0, Some("超时"), Some("err.core.network"),
+                        stream,
+                        &start,
+                        ChunkStatus::Failed,
+                        0,
+                        Some("超时"),
+                        Some("err.core.network"),
                     )
                     .unwrap();
                     failed += 1;
@@ -463,8 +500,7 @@ fn backup_restore_roundtrip_repeatedly() {
         }
         drop(db);
 
-        let manifest =
-            backup::create_backup(&dir.path, BackupKind::Manual, "stress-test").unwrap();
+        let manifest = backup::create_backup(&dir.path, BackupKind::Manual, "stress-test").unwrap();
         assert!(manifest.integrity_ok);
         let verification = backup::verify_backup(&dir.path, &manifest.id).unwrap();
         assert!(verification.is_usable(), "第 {round} 轮备份必须可用");
@@ -480,9 +516,12 @@ fn backup_restore_roundtrip_repeatedly() {
 
         let pending = backup::stage_restore(&dir.path, &manifest.id, "stress-test").unwrap();
         assert_eq!(pending.backup_id, manifest.id);
-        let outcome = backup::apply_pending_restore(&dir.path)
-            .expect("排队过的恢复必须产生结果");
-        assert!(outcome.succeeded, "第 {round} 轮恢复失败: {}", outcome.message);
+        let outcome = backup::apply_pending_restore(&dir.path).expect("排队过的恢复必须产生结果");
+        assert!(
+            outcome.succeeded,
+            "第 {round} 轮恢复失败: {}",
+            outcome.message
+        );
         assert!(backup::pending_restore(&dir.path).is_none());
 
         assert_eq!(
@@ -512,7 +551,8 @@ fn backup_concurrent_with_writes_never_produces_a_bad_snapshot() {
     let dir = Arc::new(TempDirGuard::new("backup-concurrent"));
     {
         let db = Database::open_migrated(&dir.db_path()).unwrap();
-        db.insert_raw_record(&raw_record("heart_rate", "seed")).unwrap();
+        db.insert_raw_record(&raw_record("heart_rate", "seed"))
+            .unwrap();
     }
 
     let writer_dir = Arc::clone(&dir);
@@ -571,8 +611,7 @@ fn stress_backup_restore_marathon() {
                 .unwrap();
         }
         drop(db);
-        let manifest =
-            backup::create_backup(&dir.path, BackupKind::Manual, "stress-test").unwrap();
+        let manifest = backup::create_backup(&dir.path, BackupKind::Manual, "stress-test").unwrap();
         let db = Database::open_without_migration(dir.db_path()).unwrap();
         for i in 0..5 {
             db.insert_raw_record(&raw_record("sleep", &format!("x{round}-{i}")))
@@ -597,7 +636,8 @@ fn write_lock_multithreaded_contention_keeps_every_write() {
     let dir = Arc::new(TempDirGuard::new("lock-contention"));
     {
         let db = Database::open_migrated(&dir.db_path()).unwrap();
-        db.insert_raw_record(&raw_record("heart_rate", "seed")).unwrap();
+        db.insert_raw_record(&raw_record("heart_rate", "seed"))
+            .unwrap();
     }
 
     let threads = 4;
@@ -615,14 +655,12 @@ fn write_lock_multithreaded_contention_keeps_every_write() {
                     _ => WritePurpose::Cleanup,
                 };
                 // 争用窗口有限：最多等 30 秒，超时直接失败而不是无限挂起。
-                let guard = write_lock::acquire_with_timeout(&dir.path, purpose, Duration::from_secs(30))
-                    .unwrap_or_else(|e| panic!("线程 {thread_id} 第 {round} 轮取锁失败: {e}"));
+                let guard =
+                    write_lock::acquire_with_timeout(&dir.path, purpose, Duration::from_secs(30))
+                        .unwrap_or_else(|e| panic!("线程 {thread_id} 第 {round} 轮取锁失败: {e}"));
                 let db = Database::open_without_migration(dir.db_path()).unwrap();
-                db.insert_raw_record(&raw_record(
-                    "heart_rate",
-                    &format!("t{thread_id}-r{round}"),
-                ))
-                .unwrap();
+                db.insert_raw_record(&raw_record("heart_rate", &format!("t{thread_id}-r{round}")))
+                    .unwrap();
                 drop(db);
                 drop(guard);
                 inserted += 1;
@@ -632,7 +670,10 @@ fn write_lock_multithreaded_contention_keeps_every_write() {
         }));
     }
 
-    let total_inserted: usize = handles.into_iter().map(|handle| handle.join().unwrap()).sum();
+    let total_inserted: usize = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .sum();
 
     assert_eq!(
         count_raw_records(&dir.db_path()) as usize,
@@ -651,11 +692,15 @@ fn write_lock_timeout_reports_busy_rather_than_hanging_forever() {
     let dir = TempDirGuard::new("lock-timeout");
     let _held = write_lock::try_acquire(&dir.path, WritePurpose::HistoryBackfill).unwrap();
     let started = Instant::now();
-    let error = write_lock::acquire_with_timeout(&dir.path, WritePurpose::Sync, Duration::from_millis(500))
-        .expect_err("别人持锁时必须失败");
+    let error =
+        write_lock::acquire_with_timeout(&dir.path, WritePurpose::Sync, Duration::from_millis(500))
+            .expect_err("别人持锁时必须失败");
     let elapsed = started.elapsed();
     assert!(matches!(error, write_lock::WriteLockError::Busy { .. }));
-    assert!(elapsed >= Duration::from_millis(400), "应当真的等过: {elapsed:?}");
+    assert!(
+        elapsed >= Duration::from_millis(400),
+        "应当真的等过: {elapsed:?}"
+    );
     assert!(elapsed < Duration::from_secs(10), "不该等太久: {elapsed:?}");
 }
 
@@ -669,10 +714,7 @@ fn write_lock_open_migrated_from_many_threads_serializes_migration() {
             let dir = Arc::clone(&dir);
             std::thread::spawn(move || {
                 let db = Database::open_migrated(&dir.db_path())?;
-                db.insert_raw_record(&raw_record(
-                    "heart_rate",
-                    &format!("m-{thread_index}"),
-                ))
+                db.insert_raw_record(&raw_record("heart_rate", &format!("m-{thread_index}")))
             })
         })
         .collect();
@@ -690,7 +732,8 @@ fn stress_write_lock_barrage() {
     let dir = Arc::new(TempDirGuard::new("lock-barrage"));
     {
         let db = Database::open_migrated(&dir.db_path()).unwrap();
-        db.insert_raw_record(&raw_record("heart_rate", "seed")).unwrap();
+        db.insert_raw_record(&raw_record("heart_rate", "seed"))
+            .unwrap();
     }
     let started = Instant::now();
     let handles: Vec<_> = (0..16)
@@ -735,8 +778,10 @@ fn resources_no_leftover_lock_or_staging_files_after_full_cycle() {
     let dir = TempDirGuard::new("cleanup");
     {
         let db = Database::open_migrated(&dir.db_path()).unwrap();
-        db.insert_raw_record(&raw_record("heart_rate", "c1")).unwrap();
-        db.plan_backfill(date("2026-01-01"), date("2026-02-28")).unwrap();
+        db.insert_raw_record(&raw_record("heart_rate", "c1"))
+            .unwrap();
+        db.plan_backfill(date("2026-01-01"), date("2026-02-28"))
+            .unwrap();
     }
     backup::create_backup(&dir.path, BackupKind::Manual, "stress-test").unwrap();
 
@@ -749,7 +794,10 @@ fn resources_no_leftover_lock_or_staging_files_after_full_cycle() {
             !name.ends_with(".write-lock.holder"),
             "残留持有者文件: {name}"
         );
-        assert!(!name.contains("restore-staging"), "残留恢复暂存文件: {name}");
+        assert!(
+            !name.contains("restore-staging"),
+            "残留恢复暂存文件: {name}"
+        );
         assert!(!name.contains("restore-previous"), "残留被替换库: {name}");
         assert!(name != "restore-pending.json", "残留恢复待办: {name}");
     }
@@ -808,7 +856,10 @@ fn repeated_open_write_close_cycles_are_stable() {
 fn persisting_the_same_fetched_record_twice_is_idempotent() {
     let dir = TempDirGuard::new("persist-idempotent");
     let db = Database::open_migrated(&dir.db_path()).unwrap();
-    let record = raw_record("heart_rate", "same-key-1");
+    let mut record = raw_record("heart_rate", "same-key-1");
+    // 空 items 在 v2.0.0 是 DataUnavailable，persist 会整体失败；给一条真样本。
+    record.payload =
+        serde_json::json!({ "items": [{ "timestamp": 1_768_435_200i64, "value": 72 }] });
     let (first, _) = db.persist_fetched_record(&record).unwrap();
     for _ in 0..9 {
         let (again, _) = db.persist_fetched_record(&record).unwrap();
