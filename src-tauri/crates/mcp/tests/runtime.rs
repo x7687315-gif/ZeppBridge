@@ -246,10 +246,12 @@ fn repeated_identical_requests_are_idempotent() {
 
 #[test]
 fn unknown_method_and_tool_are_refused() {
-    // v2.0.0 行为：main 循环的「无库 → -32001」检查先于方法分派，
-    // 所以没有数据库时未知方法拿到的是 not_configured 而不是 method_not_found。
-    // 对客户端排障是个小语义损失（拼错方法名与没装库分不清），已记录为
-    // BUGS_FOUND.md 的 V9；这里钉住现状，防止无人知晓地再变。
+    // v2.0.0 的错误码矩阵（V9，BUGS_FOUND.md）：
+    // - 未知**方法**（tools/execute）在 handle() 分派层就被拒绝 → 恒 -32601；
+    // - 未知**工具**走 tools/call → call_tool 先 open_db() 再匹配工具名，
+    //   所以无库时是 -32001（not_configured），有库时才是 -32601。
+    // 无库时「拼错工具名」与「还没同步」分不清，是排障语义的小损失；
+    // 这里钉住现状，防止无人知晓地再变。
     let dir = temp_dir("unknown");
     let mut session = McpSession::new(&dir);
 
@@ -257,8 +259,18 @@ fn unknown_method_and_tool_are_refused() {
     let unknown_method = session.request(2, "tools/execute", json!({}));
     assert_eq!(
         unknown_method["error"]["code"],
+        -32601,
+        "未知方法在分派层拒绝，与库无关：{unknown_method}"
+    );
+    let unknown_tool = session.request(
+        3,
+        "tools/call",
+        json!({ "name": "delete_everything", "arguments": {} }),
+    );
+    assert_eq!(
+        unknown_tool["error"]["code"],
         -32001,
-        "无库时未知方法当前返回 -32001（V9）：{unknown_method}"
+        "无库时未知工具先撞上 open_db（V9）：{unknown_tool}"
     );
 
     // 有库之后，未知方法与未知工具都必须明确报 method_not_found。

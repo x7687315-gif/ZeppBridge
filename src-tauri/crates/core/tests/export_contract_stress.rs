@@ -253,12 +253,30 @@ fn gpx_export_is_stable_and_only_carries_real_points() {
         let (encoded_again, _) = db.build_ai_export(&selection).unwrap();
         let export_again = serde_json::from_str::<Value>(&encoded_again).unwrap();
         let (gpx_again, points_again) = to_gpx(&export_again).unwrap();
-        assert_eq!(gpx_again, gpx_first, "第 {round} 轮 GPX 内容漂移");
+        assert_eq!(
+            strip_metadata(&gpx_again),
+            strip_metadata(&gpx_first),
+            "第 {round} 轮 GPX 轨迹内容漂移（metadata 时间戳允许不同）"
+        );
         assert_eq!(points_again, points_first);
     }
 
     // 轨迹里不允许 (0,0) 点。
     assert!(!gpx_first.contains("lat=\"0.000000\" lon=\"0.000000\""));
+}
+
+/// GPX 的 `<metadata>` 段里是导出时刻的时间戳，逐次导出必然不同；
+/// 语义比较必须把它剥掉，而轨迹点本身（含每个 trkpt 的 `<time>`）保持严格一致。
+fn strip_metadata(gpx: &str) -> String {
+    match (gpx.find("<metadata>"), gpx.find("</metadata>")) {
+        (Some(start), Some(end)) => {
+            let mut out = String::with_capacity(gpx.len());
+            out.push_str(&gpx[..start]);
+            out.push_str(&gpx[end + "</metadata>".len()..]);
+            out
+        }
+        _ => gpx.to_string(),
+    }
 }
 
 #[test]
@@ -286,8 +304,9 @@ fn exporting_an_empty_library_is_an_error_not_an_empty_file() {
 #[test]
 fn missing_metric_fields_never_export_as_zero() {
     let db = seeded_db("missing-daily", 120);
-    // Full 视图逐点心率都在；Summary 视图按小时聚合。两条路径都不得产出 0 值
-    // 心率（本库播种的值都在 60..90）。
+    // Full 视图逐点心率（字段 value）；Summary 视图按小时聚合（字段
+    // avg/min/max，没有 value）。两条路径的每个出现的数值都必须落在播种
+    // 区间 60..90 —— 缺失被写成 0 的话会立刻掉出去。
     for detail in [ExportDetail::Summary, ExportDetail::Full] {
         let (encoded, _) = db
             .build_ai_export(&make_selection(&["heart_rate"], detail))
@@ -296,11 +315,20 @@ fn missing_metric_fields_never_export_as_zero() {
         let samples = export["data"]["metric_samples"].as_array().unwrap();
         assert!(!samples.is_empty());
         for sample in samples {
-            let value = sample.get("value").and_then(Value::as_f64);
+            let numbers: Vec<f64> = ["value", "avg", "min", "max"]
+                .iter()
+                .filter_map(|key| sample.get(*key).and_then(Value::as_f64))
+                .collect();
             assert!(
-                matches!(value, Some(v) if (60.0..90.0).contains(&v)),
-                "心率聚合值漂出播种区间（缺失被写成 0？）: {sample}"
+                !numbers.is_empty(),
+                "样本行既没有 value 也没有聚合数值: {sample}"
             );
+            for number in numbers {
+                assert!(
+                    (60.0..90.0).contains(&number),
+                    "心率数值漂出播种区间（缺失被写成 0？）: {sample}"
+                );
+            }
         }
     }
 }
