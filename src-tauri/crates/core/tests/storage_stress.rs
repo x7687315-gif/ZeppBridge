@@ -214,7 +214,7 @@ fn stress_migrations_downgrade_reopen_marathon() {
         let downgrade_to = 1 + (round % 15) as i64;
         simulate_interrupted_migration(&dir.db_path(), downgrade_to);
         Database::open_migrated(&dir.db_path()).unwrap();
-        assert_eq!(user_version(&dir.db_path()), 16);
+        assert_eq!(user_version(&dir.db_path()), CURRENT_SCHEMA_VERSION);
         assert_eq!(
             count_raw_records(&dir.db_path()),
             100,
@@ -721,7 +721,7 @@ fn write_lock_open_migrated_from_many_threads_serializes_migration() {
     for handle in handles {
         handle.join().unwrap().unwrap();
     }
-    assert_eq!(user_version(&dir.db_path()), 16);
+    assert_eq!(user_version(&dir.db_path()), CURRENT_SCHEMA_VERSION);
     assert!(integrity_ok(&dir.db_path()));
     assert_eq!(count_raw_records(&dir.db_path()), 6);
 }
