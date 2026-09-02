@@ -121,7 +121,7 @@ test('rejects malformed JSON with stable error code', async () => {
   assert.equal(response.status, 400);
   const body = await response.json();
   assert.equal(body.error, 'invalid_json');
-  assert.equal(body.ok, undefined, '错误响应不应包含 ok 字段');
+  assert.equal(body.ok, false, 'v2.0.0 错误响应统一带 ok:false，格式稳定');
 });
 
 test('rejects truncated request body', async () => {
