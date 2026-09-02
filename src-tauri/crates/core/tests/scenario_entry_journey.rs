@@ -9,11 +9,24 @@
 //! S4：前 5 天有数据 + 中间 12 天空档 + 后 5 天有数据。空档天在序列里必须
 //!     **不存在**（而不是 0），账本里「云端没有」与「失败」绝不混淆。
 //!
+//! ## 两个容易踩的分层陷阱（本文件曾因这两点全红）
+//!
+//! 1. **stream 名 ≠ series 指标名**。`persist_fetched_record` 的 stream 是同步层
+//!    的概念（`heart_rate`、`hrv` 都合法）；而 `metric_series` 只暴露白名单里的
+//!    指标（storage/mod.rs 的 `SERIES_METRICS` / `SAMPLE_ONLY_SERIES_METRICS`），
+//!    其中按**样本折叠成日序列**的是 `hrv`。原始 `heart_rate` 样本能进库、能导出，
+//!    但不作为日序列指标——用它查 `metric_series` 只会拿到空 Vec。
+//! 2. **查询窗口锚定 `Local::now()`**。`metric_series` 的窗口是
+//!    `[今天-(days-1), 今天]`，所以播种日期必须**相对今天**计算；写死日历日期
+//!    会在几天后静默地全部落到窗口外，测试变成「0 个点」的假通过/假失败。
+//!
 //! 运行：`cargo test -p zeppbridge-core --test scenario_entry_journey -- --nocapture`
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use chrono::{Local, TimeZone};
 use serde_json::{json, Value};
 use zeppbridge_core::auth::AuthManager;
 use zeppbridge_core::models::{CapabilityStatus, ExportDetail, ExportScope, ExportSelection, RawRecord, SourceScope};
@@ -47,6 +60,25 @@ impl Drop for TempDirGuard {
     }
 }
 
+/// `days_ago` 天前当地零点的 unix 秒。
+///
+/// 序列视图按 `date(timestamp, 'localtime')` 分组，所以播种时刻必须对齐到
+/// 当地零点，否则一天 12 条样本会跨午夜被拆成两天。
+fn local_midnight(days_ago: i64) -> i64 {
+    let day = Local::now().date_naive() - chrono::Duration::days(days_ago);
+    Local
+        .from_local_datetime(&day.and_hms_opt(0, 0, 0).unwrap())
+        .unwrap()
+        .timestamp()
+}
+
+/// `days_ago` 天前的当地日期（`YYYY-MM-DD`），用于导出范围与空档比对。
+fn local_date(days_ago: i64) -> String {
+    (Local::now().date_naive() - chrono::Duration::days(days_ago))
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
 fn fetched(stream: &str, source_key: &str, payload: Value) -> RawRecord {
     RawRecord {
         stream: stream.to_string(),
@@ -60,8 +92,11 @@ fn fetched(stream: &str, source_key: &str, payload: Value) -> RawRecord {
     }
 }
 
-/// 一天的小时级心率样本（每天 10 点到 21 点，共 12 条，值 60..100）。
-fn heart_rate_day(day_start_unix: i64) -> Value {
+/// 一天的小时级样本（每天 10 点到 21 点，共 12 条，值 60..100）。
+///
+/// 走 `hrv` 这条流：它是 `metric_series` 白名单里**按样本折叠**的指标，
+/// 因此播种的 12 条读数会折叠成当天一个点，`samples == Some(12)`。
+fn sample_day(day_start_unix: i64) -> Value {
     let items: Vec<Value> = (0..12)
         .map(|hour| {
             json!({
@@ -107,20 +142,20 @@ fn s1_first_day_journey_every_exit_is_honest() {
     );
 
     // 3. 第一天数据来了（真实写入路径）：读回必须一致。
-    let day_start = 1_768_435_200i64; // 2026-01-15 UTC
+    let day_start = local_midnight(0);
     db.persist_fetched_record(&fetched(
-        "heart_rate",
-        &format!("heart_rate:{day_start}"),
-        heart_rate_day(day_start),
+        "hrv",
+        &format!("hrv:{day_start}"),
+        sample_day(day_start),
     ))
     .unwrap();
 
     let series = db
-        .metric_series(&["heart_rate".to_string()], 3)
+        .metric_series(&["hrv".to_string()], 3)
         .unwrap()
         .into_iter()
-        .find(|s| s.metric == "heart_rate")
-        .expect("heart_rate 序列必须存在");
+        .find(|s| s.metric == "hrv")
+        .expect("hrv 序列必须存在");
     assert_eq!(series.points.len(), 1, "只有播种的那一天有数据");
     let point = &series.points[0];
     assert_eq!(point.samples, Some(12), "当天的 12 条小时样本");
@@ -132,10 +167,10 @@ fn s1_first_day_journey_every_exit_is_honest() {
 
     // 4. 导出（用户第一次把数据交给 AI）。
     let selection = ExportSelection {
-        scope: Some(ExportScope::date_range("2026-01-14", "2026-01-16")),
+        scope: Some(ExportScope::date_range(&local_date(1), &local_date(0))),
         start_date: None,
         end_date: None,
-        data_types: vec!["heart_rate".to_string()],
+        data_types: vec!["hrv".to_string()],
         detail: ExportDetail::Full,
     };
     let (encoded, size) = db.build_ai_export(&selection).unwrap();
@@ -147,7 +182,7 @@ fn s1_first_day_journey_every_exit_is_honest() {
     // 5. 只读出口（MCP / status 用的那条路）不写库。
     let before = std::fs::read(dir.path.join("zepp.db")).unwrap();
     let readonly = Database::open_read_only(dir.path.join("zepp.db")).unwrap();
-    let _again = readonly.metric_series(&["heart_rate".to_string()], 3).unwrap();
+    let _again = readonly.metric_series(&["hrv".to_string()], 3).unwrap();
     drop(readonly);
     let after = std::fs::read(dir.path.join("zepp.db")).unwrap();
     assert_eq!(before, after, "只读连接不得修改主库");
@@ -155,10 +190,10 @@ fn s1_first_day_journey_every_exit_is_honest() {
     // 6. 退出应用再打开（用户晚上又点开了一次）：数据还在。
     drop(db);
     let db = Database::open_migrated(&dir.path.join("zepp.db")).unwrap();
-    let series = db.metric_series(&["heart_rate".to_string()], 3).unwrap();
-    let heart = series.iter().find(|s| s.metric == "heart_rate").unwrap();
-    assert_eq!(heart.points.len(), 1, "重进应用后数据还在");
-    assert_eq!(heart.points[0].samples, Some(12));
+    let series = db.metric_series(&["hrv".to_string()], 3).unwrap();
+    let hrv = series.iter().find(|s| s.metric == "hrv").unwrap();
+    assert_eq!(hrv.points.len(), 1, "重进应用后数据还在");
+    assert_eq!(hrv.points[0].samples, Some(12));
 }
 
 // ---------------------------------------------------------------------------
@@ -170,14 +205,15 @@ fn s4_unworn_gap_days_do_not_exist_and_empty_is_not_failed() {
     let dir = TempDirGuard::new("s4-gap");
     let db = Database::open_migrated(&dir.path.join("zepp.db")).unwrap();
 
-    // 7 月 1-5 日戴表，7 月 6-17 日没戴，7 月 18-22 日又戴了。
-    let july_1 = 1_782_864_000i64; // 2026-07-01 UTC
-    let day = 86_400i64;
-    for &offset in &[0i64, 1, 2, 3, 4, 17, 18, 19, 20, 21] {
+    // 22 天窗口里：最老的 5 天（21..17 天前）戴表，中间 12 天（16..5 天前）
+    // 空档，最近 5 天（4..0 天前）又戴了。日期相对今天算，见文件头说明。
+    let worn_offsets = [21i64, 20, 19, 18, 17, 4, 3, 2, 1, 0];
+    for &offset in &worn_offsets {
+        let day_start = local_midnight(offset);
         db.persist_fetched_record(&fetched(
-            "heart_rate",
-            &format!("heart_rate:{}", july_1 + offset * day),
-            heart_rate_day(july_1 + offset * day),
+            "hrv",
+            &format!("hrv:{day_start}"),
+            sample_day(day_start),
         ))
         .unwrap();
     }
@@ -185,11 +221,11 @@ fn s4_unworn_gap_days_do_not_exist_and_empty_is_not_failed() {
     // 序列视图：10 天有数据，22 天的窗口里其余 12 天必须**不存在**，
     // 绝不允许出现 0 值或补出的点。
     let series = db
-        .metric_series(&["heart_rate".to_string()], 31)
+        .metric_series(&["hrv".to_string()], 22)
         .unwrap()
         .into_iter()
-        .find(|s| s.metric == "heart_rate")
-        .expect("heart_rate 序列必须存在");
+        .find(|s| s.metric == "hrv")
+        .expect("hrv 序列必须存在");
     assert_eq!(
         series.points.len() as i64, series.days_with_data,
         "points 与 days_with_data 必须自洽"
@@ -202,30 +238,41 @@ fn s4_unworn_gap_days_do_not_exist_and_empty_is_not_failed() {
             point
         );
     }
+    // 空档天必须**不在** points 里——不是 value = 0，是压根没有这个点。
+    let present: BTreeSet<&str> = series.points.iter().map(|p| p.date.as_str()).collect();
+    for offset in 5..=16i64 {
+        let gap = local_date(offset);
+        assert!(
+            !present.contains(gap.as_str()),
+            "空档天 {gap} 不该出现在序列里（实际点位: {present:?}）"
+        );
+    }
 
     // 导出视图：空档窗口里一条样本都没有。
     let selection = ExportSelection {
-        scope: Some(ExportScope::date_range("2026-07-01", "2026-07-31")),
+        scope: Some(ExportScope::date_range(&local_date(21), &local_date(0))),
         start_date: None,
         end_date: None,
-        data_types: vec!["heart_rate".to_string()],
+        data_types: vec!["hrv".to_string()],
         detail: ExportDetail::Full,
     };
     let (encoded, _) = db.build_ai_export(&selection).unwrap();
     let export = serde_json::from_str::<Value>(&encoded).unwrap();
     let samples = export["data"]["metric_samples"].as_array().unwrap();
     assert_eq!(samples.len(), 10 * 12, "只应有戴表日的 120 条样本");
+    let expected_days: BTreeSet<String> =
+        worn_offsets.iter().map(|&offset| local_date(offset)).collect();
     for sample in samples {
         let timestamp = sample["timestamp"].as_str().unwrap();
-        let day_of_month: u32 = timestamp[8..10].parse().unwrap();
+        let day = &timestamp[..10];
         assert!(
-            day_of_month <= 5 || day_of_month >= 18,
-            "空档期（7 月 6-17 日）出现了样本: {timestamp}"
+            expected_days.contains(day),
+            "空档期出现了样本: {timestamp}（期望日期: {expected_days:?}）"
         );
     }
 
-    // 账本视图：6 月整月云端明确没有（表还没激活），7 月写入，8 月还没拉。
-    // 「云端没有」绝不能混进失败清单。
+    // 账本视图：这一段用的是真正的补拉流 `heart_rate`，与上面播种的
+    // `hrv` 无关——记录补拉结果不需要先有数据。
     let june_1 = chrono::NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
     let aug_31 = chrono::NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
     db.plan_backfill(june_1, aug_31).unwrap();
